@@ -402,6 +402,65 @@ VERIFY:
 
 ---
 
+### Playbook P9: "User wants to install an external channel/plugin (e.g., WeChat)"
+**Label: EXTERNAL_PLUGIN_INSTALL**
+
+OpenClaw supports third-party plugins (e.g., WeChat via `@tencent-weixin/openclaw-weixin`) that are not in the stock plugin list. These require explicit install and QR-code login.
+
+```
+DIAGNOSE:
+  # Check if the plugin is already installed:
+  openclaw plugins list 2>/dev/null | grep -i <plugin-name>
+  # Check if the package exists on npm:
+  npm view <npm-spec> 2>/dev/null | head -5
+
+ACT:
+  # Step 1: Backup config
+  cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.backup.$(date +%Y%m%d)
+
+  # Step 2: Install the plugin (NOT npx — use openclaw's plugin installer)
+  openclaw plugins install <npm-spec>
+  # Note: "npx -y <pkg>" will fail with "could not determine executable to run"
+  # because channel plugins are not standalone CLIs.
+
+  # Step 3: Check security audit results
+  openclaw security audit --deep 2>&1 | grep -A10 <plugin-name>
+  # WARNING: The audit may flag "[potential-exfiltration]" patterns.
+  # For channel plugins (e.g., WeChat), file read + network send is NORMAL
+  # (e.g., encrypting and uploading images to WeChat CDN). These are often
+  # false positives. Review the actual code to confirm.
+
+  # Step 4: QR code login (if the plugin requires it)
+  openclaw channels login --channel <channel-id>
+  # IMPORTANT: QR codes expire after ~5 minutes. If the login process times out,
+  # re-run the command to get a fresh QR code.
+
+  # Step 5: Restart Gateway to load the new channel
+  openclaw gateway restart
+
+VERIFY:
+  openclaw plugins list 2>/dev/null | grep -i <plugin-name>
+  # Expected: shows "loaded" status
+  sleep 15
+  openclaw status 2>&1 | grep -i <channel-name>
+  # Expected: channel appears in the status output
+```
+
+**Post-install configuration notes:**
+- The plugin installer automatically updates `openclaw.json` (adds `plugins.entries` and `plugins.installs`). A `.bak` backup is also created by the installer itself.
+- After install, you'll see "plugins.allow is empty; discovered non-bundled plugins may auto-load" in logs. This is a **warning, not an error**. To silence it, add the plugin ID to `plugins.allow` in config.
+- If the gateway log shows "invalid channels.start channel" after login, it means the login credentials were saved but the gateway hasn't picked them up yet. A `gateway restart` fixes this.
+
+**Uninstalling an external plugin:**
+```
+# Use the same cleanup procedure as P1b:
+# 1. Remove from bindings[], channels{}, plugins.entries{}, plugins.installs{}
+# 2. Move ~/.openclaw/extensions/<name> to trash
+# 3. openclaw gateway restart
+```
+
+---
+
 ## Global Invariants (must hold after any operation)
 
 After ANY start/restart/upgrade operation, verify these before declaring success:
@@ -433,6 +492,10 @@ If any invariant fails, do not declare success. Go back to State Diagnosis (Phas
 | `openclaw status` shows "Update available" | 0 (do not act) | This is INFORMATION, not a TODO. Only upgrade if user explicitly asked. |
 | `openclaw gateway stop` → service no longer auto-starts after reboot | 1 | Re-bootstrap with `openclaw gateway start`. For temporary stops, prefer `launchctl stop gui/$(id -u)/ai.openclaw.gateway` to avoid bootout. |
 | User reports "Gateway won't start after login" but plist exists and `openclaw status` looks OK | 1 | Check State F (domain registration). Likely P8 DOMAIN_DEREGISTERED. |
+| `npx -y <plugin-pkg>` → "could not determine executable to run" | 1 | Use `openclaw plugins install <npm-spec>` instead. Channel plugins are not standalone CLIs. |
+| Plugin install → security audit shows "[potential-exfiltration]" | 0 (do not panic) | For channel plugins, file read + network send is normal (e.g., uploading images to WeChat CDN). Review code to confirm it's a false positive. |
+| `openclaw channels login` → QR code expired | 1 | Re-run the login command to get a fresh QR code. Codes expire after ~5 minutes. |
+| QR login succeeds but gateway shows "invalid channels.start channel" | 1 | Credentials saved but gateway hasn't loaded them. Run `openclaw gateway restart`. |
 
 ---
 

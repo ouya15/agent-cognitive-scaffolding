@@ -551,6 +551,74 @@ VERIFY:
 
 ---
 
+### Playbook P9: "User wants to install an external channel/plugin (e.g., WeChat)"
+> 【P9：用户要求安装外部频道/插件（如微信）—— 外部插件安装】
+**Label: EXTERNAL_PLUGIN_INSTALL**
+> 【标签：外部插件安装】
+
+OpenClaw supports third-party plugins (e.g., WeChat via `@tencent-weixin/openclaw-weixin`) that are not in the stock plugin list. These require explicit install and QR-code login.
+> 【OpenClaw 支持第三方插件（如微信 `@tencent-weixin/openclaw-weixin`），这些插件不在内置列表中。需要显式安装和扫码登录。】
+
+```
+DIAGNOSE:
+  # Check if the plugin is already installed:
+  openclaw plugins list 2>/dev/null | grep -i <plugin-name>
+  # Check if the package exists on npm:
+  npm view <npm-spec> 2>/dev/null | head -5
+> 【诊断：先检查插件是否已安装，再检查 npm 上是否存在该包】
+
+ACT:
+  # Step 1: Backup config
+  cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.backup.$(date +%Y%m%d)
+
+  # Step 2: Install the plugin (NOT npx — use openclaw's plugin installer)
+  openclaw plugins install <npm-spec>
+  # Note: "npx -y <pkg>" will fail with "could not determine executable to run"
+  # because channel plugins are not standalone CLIs.
+> 【操作：第一步备份配置；第二步用 openclaw plugins install 安装（不是 npx！频道插件不是独立 CLI 工具，npx 会报错）】
+
+  # Step 3: Check security audit results
+  openclaw security audit --deep 2>&1 | grep -A10 <plugin-name>
+  # WARNING: The audit may flag "[potential-exfiltration]" patterns.
+  # For channel plugins (e.g., WeChat), file read + network send is NORMAL
+  # (e.g., encrypting and uploading images to WeChat CDN). These are often
+  # false positives. Review the actual code to confirm.
+> 【第三步：检查安全审计结果。注意：审计可能会标记"[potential-exfiltration]"（潜在数据外泄）模式。对于频道插件（如微信），"文件读取+网络发送"是正常的（比如加密上传图片到微信 CDN）。这些通常是误报，查看实际代码确认即可。】
+
+  # Step 4: QR code login (if the plugin requires it)
+  openclaw channels login --channel <channel-id>
+  # IMPORTANT: QR codes expire after ~5 minutes. If the login process times out,
+  # re-run the command to get a fresh QR code.
+> 【第四步：扫码登录（如果插件需要）。注意：二维码约 5 分钟过期。如果登录超时，重新运行命令获取新二维码。】
+
+  # Step 5: Restart Gateway to load the new channel
+  openclaw gateway restart
+> 【第五步：重启 Gateway 加载新频道】
+
+VERIFY:
+  openclaw plugins list 2>/dev/null | grep -i <plugin-name>
+  # Expected: shows "loaded" status
+  sleep 15
+  openclaw status 2>&1 | grep -i <channel-name>
+  # Expected: channel appears in the status output
+> 【验证：插件列表显示"loaded"状态，等待 15 秒后 status 输出中出现该频道】
+```
+
+> 【安装后配置注意事项：】
+> - 插件安装器会自动更新 openclaw.json（添加 plugins.entries 和 plugins.installs）。安装器自身也会创建 .bak 备份。
+> - 安装后日志中会出现 "plugins.allow is empty; discovered non-bundled plugins may auto-load" 警告。这是 informational 不是 error。要消除它，在配置中将插件 ID 加入 plugins.allow。
+> - 如果登录后 gateway 日志显示 "invalid channels.start channel"，说明登录凭证已保存但 gateway 尚未加载。执行 gateway restart 即可解决。
+
+> 【卸载外部插件：】
+```
+# 使用与 P1b 相同的清理流程：
+# 1. 从 bindings[]、channels{}、plugins.entries{}、plugins.installs{} 中移除
+# 2. 将 ~/.openclaw/extensions/<name> 移到废纸篓
+# 3. openclaw gateway restart
+```
+
+---
+
 ## Global Invariants (must hold after any operation)
 > 【全局不变量 —— 任何操作完成后必须验证的条件】
 
@@ -600,6 +668,14 @@ If any invariant fails, do not declare success. Go back to State Diagnosis (Phas
 > | stop 后重启不自启 → 失败1次 | 用 `openclaw gateway start` 重新 bootstrap。临时停止时优先用 `launchctl stop` 避免 bootout。 |
 | User reports "Gateway won't start after login" but plist exists and `openclaw status` looks OK | 1 | Check State F (domain registration). Likely P8 DOMAIN_DEREGISTERED. |
 > | 用户反馈"登录后不自启"但配置看起来正常 → 失败1次 | 检查状态 F（域注册）。很可能是 P8 DOMAIN_DEREGISTERED。 |
+| `npx -y <plugin-pkg>` → "could not determine executable to run" | 1 | Use `openclaw plugins install <npm-spec>` instead. Channel plugins are not standalone CLIs. |
+> | npx 安装插件报错"找不到可执行文件" → 失败1次 | 改用 `openclaw plugins install <npm-spec>`。频道插件不是独立 CLI 工具。 |
+| Plugin install → security audit shows "[potential-exfiltration]" | 0 (do not panic) | For channel plugins, file read + network send is normal (e.g., uploading images to WeChat CDN). Review code to confirm it's a false positive. |
+> | 插件安装后安全审计显示"[potential-exfiltration]" → 0 次（不要慌） | 对于频道插件，文件读取+网络发送是正常的（如上传图片到微信 CDN）。查看代码确认为误报。 |
+| `openclaw channels login` → QR code expired | 1 | Re-run the login command to get a fresh QR code. Codes expire after ~5 minutes. |
+> | 扫码登录时二维码过期 → 失败1次 | 重新运行登录命令获取新二维码。二维码约 5 分钟过期。 |
+| QR login succeeds but gateway shows "invalid channels.start channel" | 1 | Credentials saved but gateway hasn't loaded them. Run `openclaw gateway restart`. |
+> | 扫码成功但 gateway 显示"invalid channels.start channel" → 失败1次 | 凭证已保存但 gateway 未加载。执行 `openclaw gateway restart`。 |
 
 ---
 
